@@ -433,16 +433,35 @@ with tab_vid:
         help="Skipping frames makes processing faster. Skipped frames reuse the last result.",
     )
 
+    max_seconds = st.slider(
+        "Max video length to process (seconds)", 5, 120, 30, 5,
+        help="Free hosting has limited memory and CPU. Shorter is faster and safer.",
+    )
+    max_width = st.select_slider(
+        "Processing size (width in pixels)", options=[320, 480, 640, 960], value=480,
+        help="Smaller frames process much faster.",
+    )
+
     if vid and st.button("Process video", key="run_vid"):
         src = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         src.write(vid.read())
         src.close()
 
         cap = cv2.VideoCapture(src.name)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        if not cap.isOpened():
+            st.error("Could not read this video. Try an MP4 (H.264) file.")
+            st.stop()
         fps = cap.get(cv2.CAP_PROP_FPS) or 25
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if fps != fps or fps > 120:  # NaN / bogus value guard
+            fps = 25
+        src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        scale = min(1.0, max_width / src_w) if src_w else 1.0
+        w = int(src_w * scale) // 2 * 2
+        h = int(src_h * scale) // 2 * 2
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        limit = int(fps * max_seconds)
+        total = min(n_frames, limit) if n_frames > 0 else limit
 
         raw_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
         writer = cv2.VideoWriter(
@@ -460,10 +479,12 @@ with tab_vid:
         idx = 0
         t0 = time.time()
 
-        while True:
+        while idx < total:
             ok, frame = cap.read()
             if not ok:
                 break
+            if scale < 1.0:
+                frame = cv2.resize(frame, (w, h))
             if idx % frame_skip == 0 or last_rgb is None:
                 last_rgb, last_dets = run_detection(model, frame, conf, iou)
                 processed += 1
