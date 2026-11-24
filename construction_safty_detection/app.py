@@ -7,11 +7,25 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections import Counter
 
-import cv2
+# --- OpenCV safety net for Streamlit Cloud -------------------------------
+# ultralytics installs the full "opencv-python", which needs libGL and fails on
+# servers without it. If the import fails, swap in the headless build.
+try:
+    import cv2
+except ImportError:
+    for name in [m for m in sys.modules if m == "cv2" or m.startswith("cv2.")]:
+        del sys.modules[name]
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y",
+                    "opencv-python", "opencv-python-headless"], check=False)
+    subprocess.run([sys.executable, "-m", "pip", "install",
+                    "opencv-python-headless"], check=True)
+    import cv2
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -25,7 +39,7 @@ DEFAULT_MODEL_PATH = "best.pt"  # path to your trained YOLO weights
 
 # Classes that mean "unsafe". Any class whose name starts with "NO-" / "no_"
 # is also treated as a violation automatically (see is_violation()).
-DEFAULT_VIOLATION_CLASSES = ["NO-Hardhat", "NO-Safety Vest", "NO-Mask"]
+DEFAULT_VIOLATION_CLASSES = ["no-helmet", "no-vest"]
 
 PAGE_TITLE = "Site Safety Check"
 
@@ -368,6 +382,37 @@ with tab_img:
 # ----------------------------------------------------------------------------
 # VIDEO TAB
 # ----------------------------------------------------------------------------
+def show_video_result(res: dict):
+    st.success(f"Done. Checked {res['processed']} frames in {res['elapsed']:.1f}s.")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Frames checked", res["processed"])
+    m2.metric("Frames with violations", res["bad_frames"])
+    rate = res["bad_frames"] / res["processed"] if res["processed"] else 0
+    m3.metric("Violation rate", f"{rate:.0%}")
+
+    if res["counts"]:
+        st.dataframe(
+            pd.DataFrame(
+                [{"Class": k, "Total detections": v,
+                  "Status": "Violation" if is_violation(k, violation_set) else "OK"}
+                 for k, v in res["counts"].most_common()]
+            ),
+            use_container_width=True, hide_index=True,
+        )
+    if res["playable"]:
+        st.video(res["path"])
+    else:
+        st.caption(
+            "Install ffmpeg to enable in-browser playback of the result. "
+            "The download works either way."
+        )
+    with open(res["path"], "rb") as f:
+        st.download_button(
+            "Download annotated video", f.read(),
+            file_name="safety_check.mp4", mime="video/mp4", key="dl_vid",
+        )
+
+
 with tab_vid:
     vid = st.file_uploader(
         "Drop a site video here", type=["mp4", "mov", "avi", "mkv"], key="vid_up"
@@ -376,8 +421,7 @@ with tab_vid:
         "Speed vs. detail",
         options=[1, 2, 3, 5],
         value=2,
-        format_func=lambda x: "Every frame" if x == 1 else f"Every {x}rd frame"
-        if x == 3 else f"Every {x}th frame" if x > 3 else f"Every {x}nd frame",
+        format_func=lambda x: "Every frame" if x == 1 else f"1 in every {x} frames",
         help="Skipping frames makes processing faster. Skipped frames reuse the last result.",
     )
 
@@ -402,9 +446,9 @@ with tab_vid:
         bar = st.progress(0.0, text="Starting…")
 
         all_counts = Counter()
-        frames_with_violation = 0
+        bad_frames = 0
         processed = 0
-        last_rgb, last_dets = None, []
+        last_rgb = None
         idx = 0
         t0 = time.time()
 
@@ -417,7 +461,7 @@ with tab_vid:
                 processed += 1
                 all_counts.update(n for n, _ in last_dets)
                 if any(is_violation(n, violation_set) for n, _ in last_dets):
-                    frames_with_violation += 1
+                    bad_frames += 1
                 preview.image(last_rgb, use_container_width=True)
                 with verdict_slot.container():
                     render_verdict(last_dets, violation_set)
@@ -428,44 +472,25 @@ with tab_vid:
         cap.release()
         writer.release()
         bar.empty()
-
-        elapsed = time.time() - t0
-        st.success(f"Done. Checked {processed} frames in {elapsed:.1f}s.")
-
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Frames checked", processed)
-        m2.metric("Frames with violations", frames_with_violation)
-        m3.metric(
-            "Violation rate",
-            f"{(frames_with_violation / processed):.0%}" if processed else "0%",
-        )
-
-        if all_counts:
-            st.dataframe(
-                pd.DataFrame(
-                    [{"Class": k, "Total detections": v,
-                      "Status": "Violation" if is_violation(k, violation_set) else "OK"}
-                     for k, v in all_counts.most_common()]
-                ),
-                use_container_width=True, hide_index=True,
-            )
+        preview.empty()
+        verdict_slot.empty()
 
         final_path = raw_out.replace(".mp4", "_h264.mp4")
         playable = reencode_for_browser(raw_out, final_path)
-        out_path = final_path if playable else raw_out
-        if playable:
-            preview.empty()
-            st.video(out_path)
-        with open(out_path, "rb") as f:
-            st.download_button(
-                "Download annotated video", f.read(),
-                file_name="safety_check.mp4", mime="video/mp4",
-            )
-        if not playable:
-            st.caption(
-                "Install ffmpeg to enable in-browser playback of the result. "
-                "The download works either way."
-            )
+
+        # Keep results in session state so they survive the rerun
+        # that happens when the download button is clicked.
+        st.session_state["vid_result"] = {
+            "path": final_path if playable else raw_out,
+            "playable": playable,
+            "processed": processed,
+            "bad_frames": bad_frames,
+            "counts": all_counts,
+            "elapsed": time.time() - t0,
+        }
+
+    if "vid_result" in st.session_state:
+        show_video_result(st.session_state["vid_result"])
 
 # ----------------------------------------------------------------------------
 # CAMERA TAB
