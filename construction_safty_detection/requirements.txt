@@ -1,6 +1,6 @@
 streamlit
 ultralytics
-opencv-python-headless
-numpy
+opencv-python-headless<5
+numpy<2.3
 pillow
 pyarrow<25
