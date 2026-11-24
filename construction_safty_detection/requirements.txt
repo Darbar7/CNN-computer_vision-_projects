@@ -1,9 +1,9 @@
---index-url https://download.pytorch.org/whl/cpu
---extra-index-url https://pypi.org/simple
-
-streamlit
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
 ultralytics
-opencv-python-headless<4.13.0.90
-pillow
+opencv-python-headless
+streamlit
 numpy
 pandas
+Pillow
