@@ -1,8 +1,8 @@
 import os
 import tempfile
 
-import cv2
 import numpy as np
+from PIL import Image
 import streamlit as st
 from ultralytics import YOLO
 
@@ -38,15 +38,20 @@ except Exception as e:
 mode = st.radio("Select Input Type", ["Image", "Video"], horizontal=True)
 
 if mode == "Image":
-    uploaded_file = st.file_uploader("Upload a construction site image", type=["jpg", "jpeg", "png", "webp"])
+    uploaded_file = st.file_uploader(
+        "Upload a construction site image",
+        type=["jpg", "jpeg", "png", "webp"],
+    )
+
     if uploaded_file is not None:
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        bgr_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        if bgr_image is None:
-            st.error("Could not decode the uploaded image.")
+        try:
+            pil_image = Image.open(uploaded_file).convert("RGB")
+        except Exception as e:
+            st.error(f"Could not read the uploaded image: {e}")
             st.stop()
 
-        rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+        rgb_image = np.array(pil_image)
+
         with st.spinner("Running detection..."):
             results = model.predict(source=rgb_image, conf=conf_threshold, verbose=False)
             annotated_rgb = results[0].plot()
@@ -67,13 +72,24 @@ if mode == "Image":
             for cid in class_ids:
                 label = names.get(cid, str(cid))
                 counts[label] = counts.get(label, 0) + 1
+
             st.subheader("Detection Summary")
             st.json(counts)
         else:
             st.info("No objects detected above the selected confidence threshold.")
 
 elif mode == "Video":
-    uploaded_video = st.file_uploader("Upload a construction site video", type=["mp4", "avi", "mov", "mkv"])
+    try:
+        import cv2
+    except Exception as e:
+        st.error(f"OpenCV (`cv2`) failed to load for video processing: {e}")
+        st.stop()
+
+    uploaded_video = st.file_uploader(
+        "Upload a construction site video",
+        type=["mp4", "avi", "mov", "mkv"],
+    )
+
     if uploaded_video is not None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as input_tmp:
             input_tmp.write(uploaded_video.read())
@@ -94,7 +110,12 @@ elif mode == "Video":
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+        writer = cv2.VideoWriter(
+            output_path,
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
         progress_bar = st.progress(0)
         status_text = st.empty()
         frame_idx = 0
@@ -109,7 +130,10 @@ elif mode == "Video":
                 writer.write(results[0].plot())
                 if total_frames > 0:
                     progress_bar.progress(min(frame_idx / total_frames, 1.0))
-                status_text.text(f"Processing frame {frame_idx}" + (f" / {total_frames}" if total_frames > 0 else ""))
+                status_text.text(
+                    f"Processing frame {frame_idx}"
+                    + (f" / {total_frames}" if total_frames > 0 else "")
+                )
         finally:
             cap.release()
             writer.release()
