@@ -1,549 +1,156 @@
-"""
-Construction Safety Detection - Streamlit front-end
-Run:  streamlit run app.py
-"""
-
-import io
 import os
-from pathlib import Path
-import shutil
-import subprocess
-import sys
 import tempfile
-import time
-from collections import Counter
 
-# --- OpenCV safety net for Streamlit Cloud -------------------------------
-# ultralytics installs the full "opencv-python", which needs libGL and fails on
-<<<<<<< HEAD
-# servers without it. If the import fails, install the headless build into a
-# separate folder (no uninstall needed) and put that folder first on sys.path.
-try:
-    import cv2
-except ImportError:
-    _target = os.path.join(tempfile.gettempdir(), "cv2_headless")
-    if not os.path.isdir(os.path.join(_target, "cv2")):
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--no-deps", "--upgrade",
-             "--target", _target, "opencv-python-headless"],
-            check=True,
-        )
-    sys.path.insert(0, _target)
-    for _name in [m for m in sys.modules if m == "cv2" or m.startswith("cv2.")]:
-        del sys.modules[_name]
-=======
-# servers without it. If the import fails, swap in the headless build.
-try:
-    import cv2
-except ImportError:
-    for name in [m for m in sys.modules if m == "cv2" or m.startswith("cv2.")]:
-        del sys.modules[name]
-    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y",
-                    "opencv-python", "opencv-python-headless"], check=False)
-    subprocess.run([sys.executable, "-m", "pip", "install",
-                    "opencv-python-headless"], check=True)
->>>>>>> 1bfae05 (Fix libGL with packages.txt and cv2 fallback)
-    import cv2
-
+import cv2
 import numpy as np
-import pandas as pd
 import streamlit as st
-from PIL import Image
 from ultralytics import YOLO
 
-# ----------------------------------------------------------------------------
-# CONFIG - edit these to match your project
-# ----------------------------------------------------------------------------
-# Weights are looked up next to app.py (works locally AND on Streamlit Cloud,
-# where the working directory is the repo root, not the app folder).
-_HERE = Path(__file__).resolve().parent
-DEFAULT_MODEL_PATH = str(_HERE / "best.pt")
-if not os.path.exists(DEFAULT_MODEL_PATH):
-    _alt = _HERE.parent / "best.pt"  # fallback: repo root
-    if _alt.exists():
-        DEFAULT_MODEL_PATH = str(_alt)
-
-# Classes that mean "unsafe". Any class whose name starts with "NO-" / "no_"
-# is also treated as a violation automatically (see is_violation()).
-DEFAULT_VIOLATION_CLASSES = ["no-helmet", "no-vest"]
-
-PAGE_TITLE = "Site Safety Check"
-
 st.set_page_config(
-    page_title=PAGE_TITLE,
+    page_title="Construction Safety Detection",
     page_icon="🦺",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# ----------------------------------------------------------------------------
-# STYLING
-# ----------------------------------------------------------------------------
-CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&display=swap');
+st.title("🦺 Construction Safety Detection")
+st.write("Upload an image or video to run safety gear and hazard detection using your trained YOLO model (`best.pt`).")
 
-:root {
-    --concrete: #EEF0F2;
-    --steel: #1E2A35;
-    --steel-soft: #5B6875;
-    --hivis: #F2B705;
-    --ok: #1F8A5B;
-    --alert: #D9381E;
-    --card: #FFFFFF;
-    --line: #D8DDE2;
-}
-
-html, body, [class*="css"], .stApp {
-    font-family: 'Barlow', sans-serif;
-    color: var(--steel);
-}
-.stApp { background: var(--concrete); }
-
-h1, h2, h3, .display {
-    font-family: 'Barlow Condensed', sans-serif !important;
-    letter-spacing: 0.01em;
-    color: var(--steel);
-}
-
-/* Header band with hazard stripe */
-.hero {
-    background: var(--steel);
-    border-radius: 6px;
-    padding: 1.6rem 2rem 1.4rem 2rem;
-    margin-bottom: 1.2rem;
-    border-bottom: 10px solid transparent;
-    border-image: repeating-linear-gradient(
-        -45deg, var(--hivis) 0 14px, var(--steel) 14px 28px) 10;
-}
-.hero h1 {
-    color: #fff !important;
-    font-size: 2.6rem;
-    margin: 0;
-    line-height: 1.05;
-}
-.hero p {
-    color: #B9C3CC;
-    margin: .5rem 0 0 0;
-    font-size: 1.02rem;
-    max-width: 62ch;
-}
-
-/* Verdict banner */
-.verdict {
-    border-radius: 6px;
-    padding: 1rem 1.3rem;
-    margin: .2rem 0 1rem 0;
-    display: flex; align-items: center; gap: .9rem;
-    border: 1px solid var(--line);
-    background: var(--card);
-}
-.verdict .dot { width: 14px; height: 14px; border-radius: 50%; flex: none; }
-.verdict .title {
-    font-family: 'Barlow Condensed', sans-serif;
-    font-weight: 700; font-size: 1.5rem; line-height: 1.1;
-}
-.verdict .sub { color: var(--steel-soft); font-size: .95rem; }
-.verdict.safe  { border-left: 8px solid var(--ok); }
-.verdict.safe .dot { background: var(--ok); }
-.verdict.unsafe { border-left: 8px solid var(--alert); }
-.verdict.unsafe .dot { background: var(--alert); }
-.verdict.idle { border-left: 8px solid var(--line); }
-.verdict.idle .dot { background: var(--line); }
-
-/* Metrics */
-[data-testid="stMetric"] {
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: .8rem 1rem;
-}
-[data-testid="stMetricLabel"] { color: var(--steel-soft); }
-[data-testid="stMetricValue"] {
-    font-family: 'Barlow Condensed', sans-serif;
-    font-size: 2.2rem;
-}
-
-/* Sidebar */
-[data-testid="stSidebar"] { background: var(--card); border-right: 1px solid var(--line); }
-
-/* Tabs */
-.stTabs [data-baseweb="tab-list"] { gap: 6px; }
-.stTabs [data-baseweb="tab"] {
-    font-family: 'Barlow Condensed', sans-serif;
-    font-size: 1.15rem; font-weight: 600;
-    padding: .5rem 1.1rem;
-}
-.stTabs [aria-selected="true"] { border-bottom: 3px solid var(--hivis) !important; }
-
-/* Buttons */
-.stButton > button, .stDownloadButton > button {
-    background: var(--hivis); color: var(--steel);
-    border: 0; border-radius: 4px; font-weight: 600;
-    padding: .55rem 1.2rem;
-}
-.stButton > button:hover, .stDownloadButton > button:hover {
-    background: #FFC81F; color: var(--steel);
-}
-.stButton > button:focus-visible, .stDownloadButton > button:focus-visible {
-    outline: 3px solid var(--steel); outline-offset: 2px;
-}
-
-footer, #MainMenu { visibility: hidden; }
-</style>
-"""
-st.markdown(CSS, unsafe_allow_html=True)
+# Locate best.pt reliably relative to this script
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
 
 
-# ----------------------------------------------------------------------------
-# HELPERS
-# ----------------------------------------------------------------------------
-@st.cache_resource(show_spinner="Loading model…")
-def load_model(path: str) -> YOLO:
-    return YOLO(path)
+@st.cache_resource
+def load_model(model_path: str) -> YOLO:
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found at: {model_path}")
+    return YOLO(model_path)
 
 
-def is_violation(name: str, violation_set: set) -> bool:
-    n = name.lower()
-    return name in violation_set or n.startswith("no-") or n.startswith("no_")
-
-
-def run_detection(model, bgr, conf, iou):
-    """Return annotated RGB image and a list of (class_name, confidence)."""
-    result = model.predict(bgr, conf=conf, iou=iou, verbose=False)[0]
-    annotated = result.plot()  # BGR
-    annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-    detections = []
-    if result.boxes is not None and len(result.boxes) > 0:
-        for c, p in zip(result.boxes.cls.tolist(), result.boxes.conf.tolist()):
-            detections.append((result.names[int(c)], float(p)))
-    return annotated_rgb, detections
-
-
-def summarize(detections, violation_set):
-    counts = Counter(name for name, _ in detections)
-    violations = {k: v for k, v in counts.items() if is_violation(k, violation_set)}
-    return counts, violations
-
-
-def render_verdict(detections, violation_set):
-    if not detections:
-        st.markdown(
-            '<div class="verdict idle"><div class="dot"></div><div>'
-            '<div class="title">Nothing detected</div>'
-            '<div class="sub">Try a clearer image or lower the confidence threshold.</div>'
-            "</div></div>",
-            unsafe_allow_html=True,
-        )
-        return
-    counts, violations = summarize(detections, violation_set)
-    if violations:
-        total = sum(violations.values())
-        items = ", ".join(f"{v} × {k}" for k, v in violations.items())
-        st.markdown(
-            f'<div class="verdict unsafe"><div class="dot"></div><div>'
-            f'<div class="title">{total} safety violation{"s" if total != 1 else ""} found</div>'
-            f'<div class="sub">{items}</div></div></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div class="verdict safe"><div class="dot"></div><div>'
-            '<div class="title">No violations found</div>'
-            '<div class="sub">All detected workers are wearing required gear.</div>'
-            "</div></div>",
-            unsafe_allow_html=True,
-        )
-
-
-def render_metrics(detections, violation_set):
-    counts, violations = summarize(detections, violation_set)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Objects detected", sum(counts.values()))
-    c2.metric("Violations", sum(violations.values()))
-    avg = np.mean([p for _, p in detections]) if detections else 0
-    c3.metric("Avg. confidence", f"{avg:.0%}")
-
-
-def render_table(detections, violation_set):
-    if not detections:
-        return
-    counts, _ = summarize(detections, violation_set)
-    confs = {}
-    for n, p in detections:
-        confs.setdefault(n, []).append(p)
-    rows = [
-        {
-            "Class": n,
-            "Count": c,
-            "Avg. confidence": f"{np.mean(confs[n]):.0%}",
-            "Status": "Violation" if is_violation(n, violation_set) else "OK",
-        }
-        for n, c in sorted(counts.items(), key=lambda x: -x[1])
-    ]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-
-def to_png_bytes(rgb) -> bytes:
-    buf = io.BytesIO()
-    Image.fromarray(rgb).save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def reencode_for_browser(src: str, dst: str) -> bool:
-    """Convert to H.264 so st.video can play it. Needs ffmpeg on PATH."""
-    if shutil.which("ffmpeg") is None:
-        return False
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", src, "-vcodec", "libx264",
-             "-pix_fmt", "yuv420p", dst],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        return True
-    except Exception:
-        return False
-
-
-# ----------------------------------------------------------------------------
-# SIDEBAR
-# ----------------------------------------------------------------------------
-with st.sidebar:
-    st.markdown("### Settings")
-
-    uploaded_weights = st.file_uploader(
-        "Custom model weights (.pt)", type=["pt"],
-        help="Leave empty to use the default model path.",
-    )
-    model_path = DEFAULT_MODEL_PATH
-    if uploaded_weights is not None:
-        tmp_dir = tempfile.mkdtemp()
-        model_path = os.path.join(tmp_dir, uploaded_weights.name)
-        with open(model_path, "wb") as f:
-            f.write(uploaded_weights.getbuffer())
-
-    conf = st.slider("Confidence threshold", 0.05, 0.95, 0.40, 0.05)
-    iou = st.slider("Overlap threshold (IoU)", 0.1, 0.95, 0.45, 0.05)
-
-    st.markdown("### Violation classes")
-    model_ok = os.path.exists(model_path)
-    all_names = []
-    model = None
-    if model_ok:
-        try:
-            model = load_model(model_path)
-            all_names = list(model.names.values())
-        except Exception as e:
-            st.error(f"Could not load model: {e}")
-    violation_choice = st.multiselect(
-        "Classes counted as unsafe",
-        options=all_names or DEFAULT_VIOLATION_CLASSES,
-        default=[c for c in DEFAULT_VIOLATION_CLASSES if c in all_names]
-        if all_names else DEFAULT_VIOLATION_CLASSES,
-        help="Classes starting with “NO-” are always counted as unsafe.",
-    )
-    violation_set = set(violation_choice)
-
-    if model is not None:
-        with st.expander("Classes this model detects"):
-            st.write(", ".join(all_names))
-
-# ----------------------------------------------------------------------------
-# HEADER
-# ----------------------------------------------------------------------------
-st.markdown(
-    f"""
-    <div class="hero">
-        <h1>{PAGE_TITLE}</h1>
-        <p>Upload a site photo, video or camera snapshot. The model checks for hard hats,
-        safety vests and other required gear, then flags anything missing.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
+# Sidebar controls
+st.sidebar.header("Settings")
+conf_threshold = st.sidebar.slider(
+    "Confidence Threshold",
+    min_value=0.05,
+    max_value=1.0,
+    value=0.25,
+    step=0.05,
 )
 
-if model is None:
-    st.warning(
-        f"Model not found at `{DEFAULT_MODEL_PATH}`. Make sure `best.pt` is committed "
-        "in the same folder as `app.py`, or upload it in the sidebar."
-    )
+try:
+    model = load_model(MODEL_PATH)
+except Exception as e:
+    st.error(f"Failed to load `best.pt`: {e}")
     st.stop()
 
-tab_img, tab_vid, tab_cam = st.tabs(["Image", "Video", "Camera"])
+mode = st.radio("Select Input Type", ["Image", "Video"], horizontal=True)
 
-# ----------------------------------------------------------------------------
-# IMAGE TAB
-# ----------------------------------------------------------------------------
-def image_flow(pil_img: Image.Image, key: str):
-    bgr = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
-    with st.spinner("Checking image…"):
-        annotated, dets = run_detection(model, bgr, conf, iou)
-
-    render_verdict(dets, violation_set)
-    left, right = st.columns(2)
-    left.image(pil_img, caption="Original", use_container_width=True)
-    right.image(annotated, caption="Detections", use_container_width=True)
-
-    render_metrics(dets, violation_set)
-    render_table(dets, violation_set)
-    st.download_button(
-        "Download annotated image",
-        data=to_png_bytes(annotated),
-        file_name="safety_check.png",
-        mime="image/png",
-        key=f"dl_{key}",
+if mode == "Image":
+    uploaded_file = st.file_uploader(
+        "Upload a construction site image",
+        type=["jpg", "jpeg", "png", "webp"],
     )
 
+    if uploaded_file is not None:
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        bgr_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-with tab_img:
-    files = st.file_uploader(
-        "Drop a site photo here", type=["jpg", "jpeg", "png", "webp"],
-        key="img_up",
-    )
-    if files:
-        image_flow(Image.open(files), "img")
-    else:
-        render_verdict([], violation_set)
-
-# ----------------------------------------------------------------------------
-# VIDEO TAB
-# ----------------------------------------------------------------------------
-def show_video_result(res: dict):
-    st.success(f"Done. Checked {res['processed']} frames in {res['elapsed']:.1f}s.")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Frames checked", res["processed"])
-    m2.metric("Frames with violations", res["bad_frames"])
-    rate = res["bad_frames"] / res["processed"] if res["processed"] else 0
-    m3.metric("Violation rate", f"{rate:.0%}")
-
-    if res["counts"]:
-        st.dataframe(
-            pd.DataFrame(
-                [{"Class": k, "Total detections": v,
-                  "Status": "Violation" if is_violation(k, violation_set) else "OK"}
-                 for k, v in res["counts"].most_common()]
-            ),
-            use_container_width=True, hide_index=True,
-        )
-    if res["playable"]:
-        st.video(res["path"])
-    else:
-        st.caption(
-            "Install ffmpeg to enable in-browser playback of the result. "
-            "The download works either way."
-        )
-    with open(res["path"], "rb") as f:
-        st.download_button(
-            "Download annotated video", f.read(),
-            file_name="safety_check.mp4", mime="video/mp4", key="dl_vid",
-        )
-
-
-with tab_vid:
-    vid = st.file_uploader(
-        "Drop a site video here", type=["mp4", "mov", "avi", "mkv"], key="vid_up"
-    )
-    frame_skip = st.select_slider(
-        "Speed vs. detail",
-        options=[1, 2, 3, 5],
-        value=2,
-        format_func=lambda x: "Every frame" if x == 1 else f"1 in every {x} frames",
-        help="Skipping frames makes processing faster. Skipped frames reuse the last result.",
-    )
-
-    max_seconds = st.slider(
-        "Max video length to process (seconds)", 5, 120, 30, 5,
-        help="Free hosting has limited memory and CPU. Shorter is faster and safer.",
-    )
-    max_width = st.select_slider(
-        "Processing size (width in pixels)", options=[320, 480, 640, 960], value=480,
-        help="Smaller frames process much faster.",
-    )
-
-    if vid and st.button("Process video", key="run_vid"):
-        src = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        src.write(vid.read())
-        src.close()
-
-        cap = cv2.VideoCapture(src.name)
-        if not cap.isOpened():
-            st.error("Could not read this video. Try an MP4 (H.264) file.")
+        if bgr_image is None:
+            st.error("Could not decode the uploaded image.")
             st.stop()
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25
-        if fps != fps or fps > 120:  # NaN / bogus value guard
-            fps = 25
-        src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        scale = min(1.0, max_width / src_w) if src_w else 1.0
-        w = int(src_w * scale) // 2 * 2
-        h = int(src_h * scale) // 2 * 2
-        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        limit = int(fps * max_seconds)
-        total = min(n_frames, limit) if n_frames > 0 else limit
 
-        raw_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-        writer = cv2.VideoWriter(
-            raw_out, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
-        )
+        rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
 
-        verdict_slot = st.empty()
-        preview = st.empty()
-        bar = st.progress(0.0, text="Starting…")
+        with st.spinner("Running detection..."):
+            results = model.predict(source=rgb_image, conf=conf_threshold, verbose=False)
+            annotated_rgb = results[0].plot()
 
-        all_counts = Counter()
-        bad_frames = 0
-        processed = 0
-        last_rgb = None
-        idx = 0
-        t0 = time.time()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Original Image")
+            st.image(rgb_image, use_container_width=True)
+        with col2:
+            st.subheader("Detected Output")
+            st.image(annotated_rgb, use_container_width=True)
 
-        while idx < total:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if scale < 1.0:
-                frame = cv2.resize(frame, (w, h))
-            if idx % frame_skip == 0 or last_rgb is None:
-                last_rgb, last_dets = run_detection(model, frame, conf, iou)
-                processed += 1
-                all_counts.update(n for n, _ in last_dets)
-                if any(is_violation(n, violation_set) for n, _ in last_dets):
-                    bad_frames += 1
-                preview.image(last_rgb, use_container_width=True)
-                with verdict_slot.container():
-                    render_verdict(last_dets, violation_set)
-            writer.write(cv2.cvtColor(last_rgb, cv2.COLOR_RGB2BGR))
-            idx += 1
-            bar.progress(min(idx / total, 1.0), text=f"Frame {idx} of {total}")
+        # Summary of detected classes
+        boxes = results[0].boxes
+        if boxes is not None and len(boxes) > 0:
+            class_ids = boxes.cls.cpu().numpy().astype(int)
+            names = results[0].names
+            counts = {}
+            for cid in class_ids:
+                label = names.get(cid, str(cid))
+                counts[label] = counts.get(label, 0) + 1
 
-        cap.release()
-        writer.release()
-        bar.empty()
-        preview.empty()
-        verdict_slot.empty()
+            st.subheader("Detection Summary")
+            st.json(counts)
+        else:
+            st.info("No objects detected above the selected confidence threshold.")
 
-        final_path = raw_out.replace(".mp4", "_h264.mp4")
-        playable = reencode_for_browser(raw_out, final_path)
+elif mode == "Video":
+    uploaded_video = st.file_uploader(
+        "Upload a construction site video",
+        type=["mp4", "avi", "mov", "mkv"],
+    )
 
-        # Keep results in session state so they survive the rerun
-        # that happens when the download button is clicked.
-        st.session_state["vid_result"] = {
-            "path": final_path if playable else raw_out,
-            "playable": playable,
-            "processed": processed,
-            "bad_frames": bad_frames,
-            "counts": all_counts,
-            "elapsed": time.time() - t0,
-        }
+    if uploaded_video is not None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as input_tmp:
+            input_tmp.write(uploaded_video.read())
+            input_path = input_tmp.name
 
-    if "vid_result" in st.session_state:
-        show_video_result(st.session_state["vid_result"])
+        output_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        output_path = output_tmp.name
+        output_tmp.close()
 
-# ----------------------------------------------------------------------------
-# CAMERA TAB
-# ----------------------------------------------------------------------------
-with tab_cam:
-    st.caption("Take a snapshot with your device camera and check it instantly.")
-    snap = st.camera_input("Camera", label_visibility="collapsed")
-    if snap:
-        image_flow(Image.open(snap), "cam")
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            st.error("Could not open the uploaded video.")
+            os.remove(input_path)
+            st.stop()
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 0:
+            fps = 20.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        frame_idx = 0
+
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                frame_idx += 1
+                results = model.predict(source=frame, conf=conf_threshold, verbose=False)
+                annotated_frame = results[0].plot()
+                writer.write(annotated_frame)
+
+                if total_frames > 0:
+                    progress_bar.progress(min(frame_idx / total_frames, 1.0))
+                status_text.text(f"Processing frame {frame_idx}" + (f" / {total_frames}" if total_frames > 0 else ""))
+        finally:
+            cap.release()
+            writer.release()
+            if os.path.exists(input_path):
+                os.remove(input_path)
+
+        st.success("Video processing complete!")
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            st.video(output_path)
+            with open(output_path, "rb") as f:
+                st.download_button(
+                    label="Download Processed Video",
+                    data=f.read(),
+                    file_name="safety_detection_output.mp4",
+                    mime="video/mp4",
+                )
+            os.remove(output_path)
