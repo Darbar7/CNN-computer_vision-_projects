@@ -15,6 +15,7 @@ from collections import Counter
 
 # --- OpenCV safety net for Streamlit Cloud -------------------------------
 # ultralytics installs the full "opencv-python", which needs libGL and fails on
+<<<<<<< HEAD
 # servers without it. If the import fails, install the headless build into a
 # separate folder (no uninstall needed) and put that folder first on sys.path.
 try:
@@ -30,6 +31,18 @@ except ImportError:
     sys.path.insert(0, _target)
     for _name in [m for m in sys.modules if m == "cv2" or m.startswith("cv2.")]:
         del sys.modules[_name]
+=======
+# servers without it. If the import fails, swap in the headless build.
+try:
+    import cv2
+except ImportError:
+    for name in [m for m in sys.modules if m == "cv2" or m.startswith("cv2.")]:
+        del sys.modules[name]
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y",
+                    "opencv-python", "opencv-python-headless"], check=False)
+    subprocess.run([sys.executable, "-m", "pip", "install",
+                    "opencv-python-headless"], check=True)
+>>>>>>> 1bfae05 (Fix libGL with packages.txt and cv2 fallback)
     import cv2
 
 import numpy as np
