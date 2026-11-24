@@ -5,6 +5,7 @@ Run:  streamlit run app.py
 
 import io
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,14 @@ from ultralytics import YOLO
 # ----------------------------------------------------------------------------
 # CONFIG - edit these to match your project
 # ----------------------------------------------------------------------------
-DEFAULT_MODEL_PATH = "best.pt"  # path to your trained YOLO weights
+# Weights are looked up next to app.py (works locally AND on Streamlit Cloud,
+# where the working directory is the repo root, not the app folder).
+_HERE = Path(__file__).resolve().parent
+DEFAULT_MODEL_PATH = str(_HERE / "best.pt")
+if not os.path.exists(DEFAULT_MODEL_PATH):
+    _alt = _HERE.parent / "best.pt"  # fallback: repo root
+    if _alt.exists():
+        DEFAULT_MODEL_PATH = str(_alt)
 
 # Classes that mean "unsafe". Any class whose name starts with "NO-" / "no_"
 # is also treated as a violation automatically (see is_violation()).
@@ -338,8 +346,8 @@ st.markdown(
 
 if model is None:
     st.warning(
-        f"Model not found at `{DEFAULT_MODEL_PATH}`. Place your trained weights "
-        "next to `app.py` or upload them in the sidebar."
+        f"Model not found at `{DEFAULT_MODEL_PATH}`. Make sure `best.pt` is committed "
+        "in the same folder as `app.py`, or upload it in the sidebar."
     )
     st.stop()
 
