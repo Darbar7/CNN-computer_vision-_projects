@@ -13,9 +13,8 @@ st.set_page_config(
 )
 
 st.title("🦺 Construction Safety Detection")
-st.write("Upload an image or video to run safety gear and hazard detection using your trained YOLO model (`best.pt`).")
+st.write("Upload an image or video to run safety gear and hazard detection using `best.pt`.")
 
-# Locate best.pt reliably relative to this script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
 
@@ -27,15 +26,8 @@ def load_model(model_path: str) -> YOLO:
     return YOLO(model_path)
 
 
-# Sidebar controls
 st.sidebar.header("Settings")
-conf_threshold = st.sidebar.slider(
-    "Confidence Threshold",
-    min_value=0.05,
-    max_value=1.0,
-    value=0.25,
-    step=0.05,
-)
+conf_threshold = st.sidebar.slider("Confidence Threshold", 0.05, 1.0, 0.25, 0.05)
 
 try:
     model = load_model(MODEL_PATH)
@@ -46,21 +38,15 @@ except Exception as e:
 mode = st.radio("Select Input Type", ["Image", "Video"], horizontal=True)
 
 if mode == "Image":
-    uploaded_file = st.file_uploader(
-        "Upload a construction site image",
-        type=["jpg", "jpeg", "png", "webp"],
-    )
-
+    uploaded_file = st.file_uploader("Upload a construction site image", type=["jpg", "jpeg", "png", "webp"])
     if uploaded_file is not None:
         file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
         bgr_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
         if bgr_image is None:
             st.error("Could not decode the uploaded image.")
             st.stop()
 
         rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-
         with st.spinner("Running detection..."):
             results = model.predict(source=rgb_image, conf=conf_threshold, verbose=False)
             annotated_rgb = results[0].plot()
@@ -73,7 +59,6 @@ if mode == "Image":
             st.subheader("Detected Output")
             st.image(annotated_rgb, use_container_width=True)
 
-        # Summary of detected classes
         boxes = results[0].boxes
         if boxes is not None and len(boxes) > 0:
             class_ids = boxes.cls.cpu().numpy().astype(int)
@@ -82,18 +67,13 @@ if mode == "Image":
             for cid in class_ids:
                 label = names.get(cid, str(cid))
                 counts[label] = counts.get(label, 0) + 1
-
             st.subheader("Detection Summary")
             st.json(counts)
         else:
             st.info("No objects detected above the selected confidence threshold.")
 
 elif mode == "Video":
-    uploaded_video = st.file_uploader(
-        "Upload a construction site video",
-        type=["mp4", "avi", "mov", "mkv"],
-    )
-
+    uploaded_video = st.file_uploader("Upload a construction site video", type=["mp4", "avi", "mov", "mkv"])
     if uploaded_video is not None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as input_tmp:
             input_tmp.write(uploaded_video.read())
@@ -109,16 +89,12 @@ elif mode == "Video":
             os.remove(input_path)
             st.stop()
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if not fps or fps <= 0:
-            fps = 20.0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
+        writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
         progress_bar = st.progress(0)
         status_text = st.empty()
         frame_idx = 0
@@ -128,12 +104,9 @@ elif mode == "Video":
                 ret, frame = cap.read()
                 if not ret:
                     break
-
                 frame_idx += 1
                 results = model.predict(source=frame, conf=conf_threshold, verbose=False)
-                annotated_frame = results[0].plot()
-                writer.write(annotated_frame)
-
+                writer.write(results[0].plot())
                 if total_frames > 0:
                     progress_bar.progress(min(frame_idx / total_frames, 1.0))
                 status_text.text(f"Processing frame {frame_idx}" + (f" / {total_frames}" if total_frames > 0 else ""))
