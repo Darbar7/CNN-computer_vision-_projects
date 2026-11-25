@@ -478,3 +478,32 @@ with tab_vid:
                 ),
                 use_container_width=True,
                 hide_index=True,
+            )
+
+        final_path = raw_out.replace(".mp4", "_h264.mp4")
+        playable = reencode_for_browser(raw_out, final_path)
+        out_path = final_path if playable else raw_out
+        if playable:
+            preview.empty()
+            st.video(out_path)
+
+        if os.path.exists(out_path):
+            with open(out_path, "rb") as f:
+                st.download_button(
+                    "Download annotated video",
+                    f.read(),
+                    file_name="safety_check.mp4",
+                    mime="video/mp4",
+                )
+        if os.path.exists(raw_out) and raw_out != out_path:
+            os.remove(raw_out)
+
+
+with tab_cam:
+    st.caption("Take a snapshot with your device camera and check it instantly.")
+    snap = st.camera_input("Camera", label_visibility="collapsed")
+    if snap:
+        with Image.open(snap) as opened_snap:
+            image_flow(opened_snap.copy(), "cam")
+
+render_creator_footer()
