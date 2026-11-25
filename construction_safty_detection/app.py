@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 from ultralytics import YOLO
 
 # ----------------------------------------------------------------------------
@@ -44,7 +44,7 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------------
-# SAFE, SCOPED STYLING (no wildcard [class*="css"] overrides)
+# SCOPED STYLING
 # ----------------------------------------------------------------------------
 CSS = """
 <style>
@@ -90,14 +90,11 @@ CSS = """
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ----------------------------------------------------------------------------
-# RENDER HEADER IMMEDIATELY SO PAGE IS NEVER BLANK
-# ----------------------------------------------------------------------------
 st.markdown(
     f"""
     <div class="hero">
         <h1>🦺 {PAGE_TITLE}</h1>
-        <p>Upload a site photo, video, or camera snapshot to check for helmet, safety belt, and smoking violations.</p>
+        <p>Upload a site photo, video, or camera snapshot to check for safety gear and smoking violations.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -118,16 +115,19 @@ def is_violation(name: str, violation_set: set) -> bool:
 
 
 def prepare_rgb_image(pil_img: Image.Image) -> np.ndarray:
-    rgb = pil_img.convert("RGB")
+    """Apply EXIF orientation and return a clean (H, W, 3) uint8 RGB NumPy array."""
+    oriented = ImageOps.exif_transpose(pil_img)
+    rgb = oriented.convert("RGB")
     if rgb.width <= 0 or rgb.height <= 0:
         raise ValueError("Uploaded image has invalid dimensions.")
-    arr = np.asarray(rgb, dtype=np.uint8)
+    arr = np.ascontiguousarray(np.asarray(rgb, dtype=np.uint8))
     if arr.ndim != 3 or arr.shape[2] != 3:
-        arr = np.stack([arr[:, :, 0]] * 3, axis=-1).astype(np.uint8)
+        raise ValueError("Image must have 3 RGB channels.")
     return arr
 
 
 def run_detection_rgb(model: YOLO, rgb_arr: np.ndarray, conf: float, iou: float, imgsz: int = 640):
+    """Run YOLO on an RGB (H, W, 3) uint8 array and return (annotated_rgb, detections)."""
     results = model.predict(
         source=rgb_arr,
         conf=conf,
@@ -157,8 +157,8 @@ def summarize(detections, violation_set):
 def render_verdict(detections, violation_set):
     if not detections:
         st.markdown(
-            '<div class="verdict idle"><div class="title">Ready / Nothing detected</div>'
-            '<div class="sub">Upload a photo or video, or lower the confidence threshold if objects were missed.</div></div>',
+            '<div class="verdict idle"><div class="title">Nothing detected</div>'
+            '<div class="sub">Try lowering the confidence threshold in the sidebar or testing a scene with visible safety gear / smoking.</div></div>',
             unsafe_allow_html=True,
         )
         return
@@ -174,7 +174,7 @@ def render_verdict(detections, violation_set):
     else:
         st.markdown(
             '<div class="verdict safe"><div class="title">✅ No violations found</div>'
-            '<div class="sub">All detected workers comply with required safety rules.</div></div>',
+            '<div class="sub">All detected objects match safe/non-violation classes.</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -218,7 +218,11 @@ def reencode_for_browser(src: str, dst: str) -> bool:
         return False
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-i", src, "-vcodec", "libx264", "-pix_fmt", "yuv420p", dst],
+            [
+                "ffmpeg", "-y", "-i", src,
+                "-vcodec", "libx264", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", dst,
+            ],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -226,6 +230,17 @@ def reencode_for_browser(src: str, dst: str) -> bool:
         return os.path.exists(dst) and os.path.getsize(dst) > 0
     except Exception:
         return False
+
+
+def create_video_writer(out_path: str, fps: float, width: int, height: int):
+    for fourcc_str in ("mp4v", "avc1", "XVID"):
+        writer = cv2.VideoWriter(
+            out_path, cv2.VideoWriter_fourcc(*fourcc_str), fps, (width, height)
+        )
+        if writer.isOpened():
+            return writer
+        writer.release()
+    return None
 
 
 def render_creator_footer():
@@ -253,7 +268,7 @@ with st.sidebar:
         with open(model_path, "wb") as f:
             f.write(uploaded_weights.getbuffer())
 
-    conf = st.slider("Confidence threshold", 0.05, 0.95, 0.25, 0.05)
+    conf = st.slider("Confidence threshold", 0.05, 0.95, 0.20, 0.05)
     iou = st.slider("Overlap threshold (IoU)", 0.10, 0.95, 0.45, 0.05)
     imgsz = st.select_slider("Inference image size (px)", options=[640, 960, 1280], value=640)
 
@@ -346,13 +361,13 @@ with tab_img:
 with tab_vid:
     vid = st.file_uploader(
         "Drop a site video here",
-        type=["mp4", "mov", "avi", "mkv"],
+        type=["mp4", "mov", "avi", "mkv", "webm"],
         key="vid_up",
     )
     frame_skip = st.select_slider(
         "Speed vs. detail",
         options=[1, 2, 3, 5],
-        value=3,
+        value=2,
         format_func=lambda x: "Every frame" if x == 1 else f"Every {x} frames",
     )
 
@@ -368,18 +383,34 @@ with tab_vid:
         cap = cv2.VideoCapture(src_path)
         if not cap.isOpened():
             st.error("Unable to open the uploaded video file.")
-            os.remove(src_path)
+            if os.path.exists(src_path):
+                os.remove(src_path)
             st.stop()
 
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        if fps <= 0:
-            fps = 25.0
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        ok_first, first_frame = cap.read()
+        if not ok_first or first_frame is None:
+            st.error("Unable to decode frames from the uploaded video.")
+            cap.release()
+            if os.path.exists(src_path):
+                os.remove(src_path)
+            st.stop()
+
+        h, w = first_frame.shape[:2]
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 1.0 or fps > 120.0:
+            fps = 20.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total <= 0:
+            total = 1
 
         raw_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-        writer = cv2.VideoWriter(raw_out, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        writer = create_video_writer(raw_out, fps, w, h)
+        if writer is None:
+            st.error("Could not initialize video writer on this container.")
+            cap.release()
+            if os.path.exists(src_path):
+                os.remove(src_path)
+            st.stop()
 
         verdict_slot = st.empty()
         preview = st.empty()
@@ -392,14 +423,14 @@ with tab_vid:
         idx = 0
         t0 = time.time()
 
+        current_frame = first_frame
         try:
-            while True:
-                ok, frame_bgr = cap.read()
-                if not ok:
-                    break
+            while current_frame is not None:
                 if idx % frame_skip == 0 or last_rgb is None:
-                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                    last_rgb, last_dets = run_detection_rgb(model, frame_rgb, conf, iou, imgsz=imgsz)
+                    frame_rgb = cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB)
+                    last_rgb, last_dets = run_detection_rgb(
+                        model, frame_rgb, conf, iou, imgsz=imgsz
+                    )
                     processed += 1
                     all_counts.update(n for n, _ in last_dets)
                     if any(is_violation(n, violation_set) for n, _ in last_dets):
@@ -410,7 +441,10 @@ with tab_vid:
 
                 writer.write(cv2.cvtColor(last_rgb, cv2.COLOR_RGB2BGR))
                 idx += 1
-                bar.progress(min(idx / total, 1.0), text=f"Frame {idx} of {total}")
+                bar.progress(min(idx / max(total, idx), 1.0), text=f"Frame {idx} of {max(total, idx)}")
+
+                ok_next, next_frame = cap.read()
+                current_frame = next_frame if ok_next else None
         except Exception as e:
             st.error(f"Video processing failed: {e}")
         finally:
@@ -425,7 +459,10 @@ with tab_vid:
         m1, m2, m3 = st.columns(3)
         m1.metric("Frames checked", processed)
         m2.metric("Frames with violations", frames_with_violation)
-        m3.metric("Violation rate", f"{(frames_with_violation / processed):.0%}" if processed else "0%")
+        m3.metric(
+            "Violation rate",
+            f"{(frames_with_violation / processed):.0%}" if processed else "0%",
+        )
 
         if all_counts:
             st.dataframe(
@@ -441,30 +478,3 @@ with tab_vid:
                 ),
                 use_container_width=True,
                 hide_index=True,
-            )
-
-        final_path = raw_out.replace(".mp4", "_h264.mp4")
-        playable = reencode_for_browser(raw_out, final_path)
-        out_path = final_path if playable else raw_out
-        if playable:
-            preview.empty()
-            st.video(out_path)
-
-        if os.path.exists(out_path):
-            with open(out_path, "rb") as f:
-                st.download_button(
-                    "Download annotated video",
-                    f.read(),
-                    file_name="safety_check.mp4",
-                    mime="video/mp4",
-                )
-
-
-with tab_cam:
-    st.caption("Take a snapshot with your device camera and check it instantly.")
-    snap = st.camera_input("Camera", label_visibility="collapsed")
-    if snap:
-        with Image.open(snap) as opened_snap:
-            image_flow(opened_snap.copy(), "cam")
-
-render_creator_footer()
