@@ -6,10 +6,13 @@ Run:  streamlit run app.py
 import io
 import os
 import shutil
+import smtplib
 import subprocess
 import tempfile
 import time
 from collections import Counter
+from datetime import datetime
+from email.message import EmailMessage
 
 import cv2
 import numpy as np
@@ -35,6 +38,7 @@ DEFAULT_VIOLATION_CLASSES = [
 
 PAGE_TITLE = "Site Safety Check"
 CREATOR_NAME = "DARBAR NAGURU"
+NOTIFY_EMAIL = "nagurudarbar@gmail.com"
 
 st.set_page_config(
     page_title=PAGE_TITLE,
@@ -243,6 +247,76 @@ def create_video_writer(out_path: str, fps: float, width: int, height: int):
     return None
 
 
+def get_client_network_info() -> dict:
+    """Read forwarded client IP and browser User-Agent from Streamlit request headers."""
+    headers = {}
+    try:
+        if hasattr(st, "context") and hasattr(st.context, "headers"):
+            headers = dict(st.context.headers)
+    except Exception:
+        headers = {}
+
+    lower_headers = {k.lower(): v for k, v in headers.items()}
+    forwarded_for = lower_headers.get("x-forwarded-for", "")
+    client_ip = (
+        forwarded_for.split(",")[0].strip()
+        if forwarded_for
+        else lower_headers.get("x-real-ip", "Unavailable")
+    )
+    user_agent = lower_headers.get("user-agent", "Unavailable")
+    return {
+        "ip": client_ip,
+        "forwarded_chain": forwarded_for or "Unavailable",
+        "user_agent": user_agent,
+    }
+
+
+def send_checkin_email(visitor_name: str, client_info: dict, photo_bytes: bytes | None, photo_name: str) -> tuple[bool, str]:
+    """Send a consented visitor check-in notification using SMTP credentials in st.secrets."""
+    smtp_user = st.secrets.get("SMTP_USER", "")
+    smtp_pass = st.secrets.get("SMTP_APP_PASSWORD", "")
+    recipient = st.secrets.get("NOTIFY_EMAIL", NOTIFY_EMAIL)
+
+    if not smtp_user or not smtp_pass:
+        return (
+            False,
+            "Email alerts are not configured yet. Add SMTP_USER and SMTP_APP_PASSWORD in Streamlit Cloud App Settings → Secrets.",
+        )
+
+    msg = EmailMessage()
+    msg["Subject"] = f"[Site Safety Check] Visitor Check-In: {visitor_name}"
+    msg["From"] = smtp_user
+    msg["To"] = recipient
+
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    body = (
+        f"New consented visitor check-in on {PAGE_TITLE}\n"
+        f"--------------------------------------------------\n"
+        f"Visitor Name : {visitor_name}\n"
+        f"Timestamp    : {timestamp}\n"
+        f"Client IP    : {client_info.get('ip', 'Unavailable')}\n"
+        f"Forwarded IP : {client_info.get('forwarded_chain', 'Unavailable')}\n"
+        f"Device/Agent : {client_info.get('user_agent', 'Unavailable')}\n"
+    )
+    msg.set_content(body)
+
+    if photo_bytes:
+        msg.add_attachment(
+            photo_bytes,
+            maintype="image",
+            subtype="jpeg",
+            filename=photo_name or "visitor_checkin.jpg",
+        )
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+        return True, f"Check-in notification sent to {recipient}."
+    except Exception as e:
+        return False, f"Failed to send email: {e}"
+
+
 def render_creator_footer():
     st.markdown(
         f'<div class="creator-label">Created by <strong>{CREATOR_NAME}</strong></div>',
@@ -312,7 +386,9 @@ if model is None:
 # ----------------------------------------------------------------------------
 # MAIN TABS
 # ----------------------------------------------------------------------------
-tab_img, tab_vid, tab_cam = st.tabs(["📷 Image", "🎥 Video", "📸 Camera"])
+tab_img, tab_vid, tab_cam, tab_checkin = st.tabs(
+    ["📷 Image", "🎥 Video", "📸 Camera", "🪪 Visitor Check-In"]
+)
 
 
 def image_flow(pil_img: Image.Image, key: str):
@@ -500,10 +576,43 @@ with tab_vid:
 
 
 with tab_cam:
-    st.caption("Take a snapshot with your device camera and check it instantly.")
+    st.caption(
+        "Works on any laptop or phone browser over HTTPS. Click 'Allow' when your browser asks for webcam permission."
+    )
     snap = st.camera_input("Camera", label_visibility="collapsed")
     if snap:
         with Image.open(snap) as opened_snap:
             image_flow(opened_snap.copy(), "cam")
+
+
+with tab_checkin:
+    st.subheader("Consented Visitor Check-In")
+    st.info(
+        f"Submitting this form sends your entered name, IP/browser metadata, and optional check-in photo to {NOTIFY_EMAIL}."
+    )
+    visitor_name = st.text_input("Your Name", placeholder="Enter your full name")
+    checkin_photo = st.camera_input("Take a check-in snapshot (optional)", key="checkin_cam")
+    consent = st.checkbox(
+        f"I consent to sharing my name, IP/device metadata, and snapshot with {NOTIFY_EMAIL}."
+    )
+
+    if st.button("Send Check-In Notification", key="send_checkin_btn"):
+        if not visitor_name.strip():
+            st.warning("Please enter your name before submitting.")
+        elif not consent:
+            st.warning("Please check the consent box before sending.")
+        else:
+            net_info = get_client_network_info()
+            img_bytes = checkin_photo.getvalue() if checkin_photo is not None else None
+            ok, status_msg = send_checkin_email(
+                visitor_name=visitor_name.strip(),
+                client_info=net_info,
+                photo_bytes=img_bytes,
+                photo_name="visitor_checkin.jpg",
+            )
+            if ok:
+                st.success(status_msg)
+            else:
+                st.error(status_msg)
 
 render_creator_footer()
