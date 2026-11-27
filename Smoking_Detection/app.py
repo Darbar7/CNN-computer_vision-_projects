@@ -1,5 +1,7 @@
 import os
 import tempfile
+from pathlib import Path
+
 import cv2
 import numpy as np
 import streamlit as st
@@ -12,7 +14,8 @@ st.set_page_config(
     layout="wide",
 )
 
-MODEL_PATH = "best.pt"
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = str(BASE_DIR / "best.pt")
 
 
 @st.cache_resource
@@ -138,7 +141,6 @@ with tab_vid:
         st.video(uploaded_video)
 
         if st.button("▶️ Start Smoking Detection on Video", type="primary"):
-            # Save uploaded video to a temporary file
             suffix = os.path.splitext(uploaded_video.name)[1] or ".mp4"
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tfile:
                 tfile.write(uploaded_video.read())
@@ -189,7 +191,6 @@ with tab_vid:
                 out.write(annotated_frame)
                 frame_idx += 1
 
-                # Update progress & live preview every few frames for speed
                 if frame_idx % 5 == 0 or frame_idx == total_frames:
                     if total_frames > 0:
                         progress_bar.progress(min(frame_idx / total_frames, 1.0))
@@ -205,7 +206,6 @@ with tab_vid:
             progress_bar.empty()
             status_text.empty()
 
-            # Video Detection Summary
             if smoking_frames > 0:
                 st.error(
                     f"🚨 SMOKING DETECTED IN VIDEO! Cigarette spotted in **{smoking_frames}** frames "
@@ -214,7 +214,6 @@ with tab_vid:
             else:
                 st.success("✅ Clear: No smoking activity detected in the video.")
 
-            # Download button for annotated output video
             with open(output_video_path, "rb") as f:
                 st.download_button(
                     label="⬇️ Download Annotated Video",
@@ -223,7 +222,6 @@ with tab_vid:
                     mime="video/mp4",
                 )
 
-            # Cleanup temp files
             os.remove(input_video_path)
             os.remove(output_video_path)
 
